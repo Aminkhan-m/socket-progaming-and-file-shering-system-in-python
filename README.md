@@ -9,11 +9,11 @@ This project demonstrates a practical implementation of socket programming in Py
 
  Features
 
-Client-Server Architecture**: Implements TCP socket communication
-File Transfer Protocol**: Secure file sharing between client and server
-Multi-Threaded Server**: Handles multiple client connections simultaneously
-Error Handling**: Robust error management for network operations
-Cross-Platform Compatibility**: Works on Windows, 
+Client-Server Architecture: Implements TCP socket communication
+File Transfer Protocol: Secure file sharing between client and server
+Multi-Threaded Server: Handles multiple client connections simultaneously
+Error Handling: Robust error management for network operations
+Cross-Platform Compatibility: Works on Windows, 
 
  Technologies Used
 
