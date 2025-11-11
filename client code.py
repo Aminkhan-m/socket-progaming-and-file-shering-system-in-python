@@ -1,145 +1,177 @@
-"""
+
+       """
 @file client.py
-@brief TCP client for file sharing.
-@details
-Supports:
- - Uploading (PUT) local files to server.
- - Downloading (GET) files from server.
- - Works with all file types (text, image, video, audio, PDF).
+@brief TCP client for uploading and downloading files to/from the FileServer.
+
+This client connects to the FileServer over TCP and allows:
+ - Uploading files (PUT command)
+ - Downloading files (GET command)
+ - Works with all file types: videos, audio, PDFs, images, and text
+ - Handles large files by sending and receiving data in chunks (4096 bytes)
+
+Example usage:
+
+  # Download a file from the server
+  python client.py --host 127.0.0.1 --port 5001 get report.pdf
+
+  # Upload a local file to the server
+  python client.py --host 127.0.0.1 --port 5001 put video.mp4
 """
 
 import socket
 import pathlib
+from typing import Optional
 
-BUFFER_SIZE = 4096
+BUFFER_SIZE = 4096  # number of bytes to send or receive per chunk
 
 
 class FileClient:
     """
-    @class FileClient
-    @brief TCP client for uploading/downloading files.
+    A simple TCP client that can connect to the FileServer
+    to upload and download files.
     """
 
-    def __init__(self, server_host: str = "127.0.0.1", server_port: int = 5001, download_dir: str = "downloads"):
-        """
-        @brief Construct a FileClient.
-        @param server_host The server's IP address.
-        @param server_port The server's port number.
-        @param download_dir Directory to save downloaded files.
-        """
-        self.server_host = server_host
-        self.server_port = server_port
-        self.download_dir = pathlib.Path(download_dir)
-        self.download_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, host: str = "127.0.0.1", port: int = 5001) -> None:
+        self.host = host
+        self.port = port
 
-    def request_file(self, filename: str):
-        """
-        @brief Request (download) a file from server.
-        @param filename The name of the file to download.
-        """
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect((self.server_host, self.server_port))
-            s.sendall(f"GET {filename}\n".encode())
+    def _connect(self) -> socket.socket:
+        """Establish a connection to the FileServer and return the socket."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((self.host, self.port))
+        return sock
 
-            header = self._recv_line(s)
-            if not header:
+    def download_file(self, remote_name: str, local_path: Optional[str] = None) -> None:
+        """
+        Download a file from the server using the GET command.
+
+        :param remote_name: Name of the file on the server.
+        :param local_path: Optional local filename to save it as.
+        """
+        if local_path is None:
+            local_path = remote_name
+
+        local_path = str(local_path)
+
+        with self._connect() as sock:
+            # Ask the server for the file
+            sock.sendall(f"GET {remote_name}\n".encode())
+
+            # Wait for the server’s response
+            response = self._recv_line(sock)
+            if not response:
                 print("[Client] No response from server.")
                 return
 
-            if header.strip() == "NOT_FOUND":
-                print(f"[Client] File {filename} not found on server.")
+            if response.startswith("NOT_FOUND"):
+                print(f"[Client] The file '{remote_name}' does not exist on the server.")
                 return
 
-            if header.startswith("FOUND "):
-                size = int(header.split(" ", 1)[1])
-                out_path = self.download_dir / f"downloaded_{pathlib.Path(filename).name}"
-                remaining = size
-                with open(out_path, "wb") as f:
-                    while remaining > 0:
-                        chunk = s.recv(min(BUFFER_SIZE, remaining))
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        remaining -= len(chunk)
+            if not response.startswith("FOUND "):
+                print(f"[Client] Unexpected response: {response}")
+                return
 
-                if remaining == 0:
-                    print(f"[Client] Downloaded {filename} -> {out_path} ({size} bytes).")
-                else:
-                    print(f"[Client] Download incomplete: {remaining} bytes missing.")
+            # Extract file size
+            try:
+                size = int(response.strip().split(" ", 1)[1])
+            except Exception:
+                print(f"[Client] Invalid size in response: {response}")
+                return
+
+            remaining = size
+            path_obj = pathlib.Path(local_path)
+            path_obj.parent.mkdir(parents=True, exist_ok=True)
+
+            # Receive file data
+            with open(path_obj, "wb") as f:
+                while remaining > 0:
+                    chunk = sock.recv(min(BUFFER_SIZE, remaining))
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    remaining -= len(chunk)
+
+            if remaining == 0:
+                print(f"[Client] Download complete: '{local_path}' ({size} bytes).")
             else:
-                print(f"[Client] Unexpected response: {header}")
+                print("[Client] Download incomplete or interrupted.")
 
-    def upload_file(self, local_path: str, remote_name: str = None):
+    def upload_file(self, local_path: str, remote_name: Optional[str] = None) -> None:
         """
-        @brief Upload a local file to the server.
-        @param local_path The path to the file on client.
-        @param remote_name Optional new name for saving on server.
+        Upload a local file to the server using the PUT command.
+
+        :param local_path: Path to the file on your computer.
+        :param remote_name: Optional name to save as on the server.
         """
-        lp = pathlib.Path(local_path)
-        if not lp.exists() or not lp.is_file():
+        path_obj = pathlib.Path(local_path)
+        if not path_obj.exists() or not path_obj.is_file():
             print(f"[Client] Local file not found: {local_path}")
             return
 
-        remote_name = remote_name or lp.name
-        size = lp.stat().st_size
+        if remote_name is None:
+            remote_name = path_obj.name
 
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect((self.server_host, self.server_port))
-            s.sendall(f"PUT {remote_name}\n".encode())
+        file_size = path_obj.stat().st_size
 
-            resp = self._recv_line(s)
-            if resp.strip() != "SEND_SIZE":
-                print(f"[Client] Unexpected server response: {resp}")
+        with self._connect() as sock:
+            # Tell the server we want to upload
+            sock.sendall(f"PUT {remote_name}\n".encode())
+
+            # Wait for the server to ask for the file size
+            response = self._recv_line(sock)
+            if response != "SEND_SIZE":
+                print(f"[Client] Unexpected response: {response}")
                 return
 
-            s.sendall(f"SIZE {size}\n".encode())
+            # Send the size and start transferring the file
+            sock.sendall(f"SIZE {file_size}\n".encode())
 
-            with open(lp, "rb") as f:
-                while chunk := f.read(BUFFER_SIZE):
-                    s.sendall(chunk)
+            with open(path_obj, "rb") as f:
+                remaining = file_size
+                while remaining > 0:
+                    chunk = f.read(BUFFER_SIZE)
+                    if not chunk:
+                        break
+                    sock.sendall(chunk)
+                    remaining -= len(chunk)
 
-            final = self._recv_line(s)
-            print(f"[Client] Server response: {final.strip()}")
+            # Wait for confirmation
+            status = self._recv_line(sock)
+            if status == "OK":
+                print(f"[Client] Upload complete: '{local_path}' ({file_size} bytes).")
+            else:
+                print(f"[Client] Server reported an error: {status}")
 
-    def _recv_line(self, sock: socket.socket) -> str:
-        """
-        @brief Read a line from socket (until newline).
-        @param sock Socket connection to server.
-        @return Decoded string line.
-        """
+    @staticmethod
+    def _recv_line(sock: socket.socket) -> str:
+        """Read one line from the server, terminated with '\\n'."""
         data = bytearray()
         while True:
             ch = sock.recv(1)
-            if not ch:
-                break
-            if ch == b"\n":
+            if not ch or ch == b"\n":
                 break
             data.extend(ch)
             if len(data) > 4096:
                 break
-        return data.decode(errors="ignore")
+        return data.decode(errors="ignore").strip()
 
 
 if __name__ == "__main__":
-    """
-    Quick manual demo:
-    - Upload:   python client.py put localfile.mp4
-    - Download: python client.py get report.pdf
-    """
-    import sys
+    import argparse
 
-    if len(sys.argv) >= 3 and sys.argv[1] == "get":
-        filename = sys.argv[2]
-        client = FileClient()
-        client.request_file(filename)
+    parser = argparse.ArgumentParser(description="Client for the FileServer (GET / PUT).")
+    parser.add_argument("--host", default="127.0.0.1", help="Server IP address (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=5001, help="Server port number (default: 5001)")
+    parser.add_argument("command", choices=["get", "put"], help="Choose 'get' to download or 'put' to upload")
+    parser.add_argument("source", help="File path (for 'put') or filename (for 'get')")
+    parser.add_argument("dest", nargs="?", help="Optional: rename output file or destination name")
 
-    elif len(sys.argv) >= 3 and sys.argv[1] == "put":
-        local = sys.argv[2]
-        remote = sys.argv[3] if len(sys.argv) >= 4 else None
-        client = FileClient()
-        client.upload_file(local, remote)
+    args = parser.parse_args()
+    client = FileClient(host=args.host, port=args.port)
 
+    if args.command == "get":
+        client.download_file(remote_name=args.source, local_path=args.dest)
     else:
-        print("Usage:")
-        print("  python client.py get <filename_on_server>")
-        print("  python client.py put <local_path> [remote_name]")
+        client.upload_file(local_path=args.source, remote_name=args.dest)
+
+
