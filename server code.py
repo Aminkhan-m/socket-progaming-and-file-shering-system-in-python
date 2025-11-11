@@ -1,165 +1,159 @@
 """
-Client for FileServer
+@file server.py
+@brief Multi-client file server for sharing files and text messages.
 
-Supports:
- - Chat messages (MSG) with the server
- - Uploading files (PUT)
- - Downloading files (GET)
+This server supports:
+ - Uploading files to the server (PUT)
+ - Downloading files from the server (GET)
+ - Exchanging text messages with clients (MSG)
+ - Handling multiple clients at the same time using threads
+ - Works with any file type (video, audio, PDF, image, text)
 """
 
 import socket
+import threading
 import pathlib
+from typing import Tuple
 
 BUFFER_SIZE = 4096
 
 
-class FileClient:
-    def __init__(self, host="127.0.0.1", port=5001):
+class FileServer:
+    """A multi-threaded TCP server for file sharing and messaging."""
+
+    def __init__(self, host: str = "0.0.0.0", port: int = 5001, storage_dir: str = "server_files") -> None:
         self.host = host
         self.port = port
+        self.storage_dir = pathlib.Path(storage_dir)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._stop_event = threading.Event()
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
 
-    def _connect(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.connect((self.host, self.port))
-        return sock
+    def start(self) -> None:
+        """Start the server and accept client connections."""
+        self.sock.bind((self.host, self.port))
+        self.sock.listen(5)
+        print(f"[Server] Listening on {self.host}:{self.port}")
+        print(f"[Server] Storage directory: {self.storage_dir.resolve()}")
 
-    def send_message_once(self, text: str):
-        """Send a single message and print server reply."""
-        with self._connect() as sock:
-            sock.sendall(f"MSG {text}\n".encode())
-            response = self._recv_line(sock)
-            print(f"[Server] {response}")
+        try:
+            while not self._stop_event.is_set():
+                client_sock, addr = self.sock.accept()
+                print(f"[Server] New connection from {addr}")
+                thread = threading.Thread(target=self._handle_client, args=(client_sock, addr), daemon=True)
+                thread.start()
+        except KeyboardInterrupt:
+            print("[Server] KeyboardInterrupt received. Stopping server...")
+        finally:
+            self.stop()
 
-    def chat(self):
-        """
-        Chat mode: let the user send multiple messages to the server.
-        Each message is sent as MSG <text>, reply is printed.
-        Type 'exit' to leave chat mode.
-        """
-        print("\n[Chat] Type your messages. Type 'exit' to stop.\n")
-        while True:
-            text = input("You: ").strip()
-            if text.lower() in ("exit", "quit"):
-                print("[Chat] Leaving chat mode.\n")
-                break
+    def stop(self) -> None:
+        """Stop the server."""
+        self._stop_event.set()
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+        print("[Server] Server stopped.")
 
-            # For each message we open a short connection (simple and safe)
-            with self._connect() as sock:
-                sock.sendall(f"MSG {text}\n".encode())
-                reply = self._recv_line(sock)
-                print(f"Server: {reply}")
+    def _handle_client(self, client_sock: socket.socket, addr: Tuple[str, int]) -> None:
+        """Handle one client connection."""
+        with client_sock:
+            try:
+                command_line = self._recv_line(client_sock)
+                if not command_line:
+                    return
 
-    def upload_file(self, local_path, remote_name=None):
-        """Upload file to the server."""
-        path = pathlib.Path(local_path)
-        if not path.exists() or not path.is_file():
-            print("[Client] File not found.")
+                parts = command_line.strip().split(" ", 1)
+                command = parts[0].upper()
+                rest = parts[1] if len(parts) > 1 else ""
+
+                if command == "GET":
+                    self._serve_get(client_sock, rest)
+                elif command == "PUT":
+                    self._serve_put(client_sock, rest)
+                elif command == "MSG":
+                    self._handle_message(client_sock, addr, rest)
+                else:
+                    client_sock.sendall(b"ERR Unknown command\n")
+            except Exception as e:
+                print(f"[Server] Error while handling {addr}: {e}")
+
+    def _handle_message(self, client_sock: socket.socket, addr: Tuple[str, int], message: str) -> None:
+        """Handle text messages sent from clients."""
+        print(f"[Message from {addr}] {message}")
+        reply = f"Server reply: Received your message -> {message}"
+        client_sock.sendall((reply + "\n").encode())
+
+    def _serve_get(self, client_sock: socket.socket, filename: str) -> None:
+        """Send file to the client."""
+        safe_path = (self.storage_dir / pathlib.Path(filename)).resolve()
+        storage_root = self.storage_dir.resolve()
+        if not str(safe_path).startswith(str(storage_root)):
+            client_sock.sendall(b"ERR Invalid filename\n")
             return
 
-        if remote_name is None:
-            remote_name = path.name
+        if not safe_path.exists() or not safe_path.is_file():
+            client_sock.sendall(b"NOT_FOUND\n")
+            print(f"[Server] File not found: {filename}")
+            return
 
-        size = path.stat().st_size
+        size = safe_path.stat().st_size
+        client_sock.sendall(f"FOUND {size}\n".encode())
 
-        with self._connect() as sock:
-            sock.sendall(f"PUT {remote_name}\n".encode())
+        with open(safe_path, "rb") as f:
+            while chunk := f.read(BUFFER_SIZE):
+                client_sock.sendall(chunk)
+        print(f"[Server] Sent '{filename}' ({size} bytes).")
 
-            response = self._recv_line(sock)
-            if response != "SEND_SIZE":
-                print("[Client] Unexpected server response:", response)
-                return
+    def _serve_put(self, client_sock: socket.socket, filename: str) -> None:
+        """Receive file from the client."""
+        client_sock.sendall(b"SEND_SIZE\n")
+        size_line = self._recv_line(client_sock)
 
-            sock.sendall(f"SIZE {size}\n".encode())
+        if not size_line or not size_line.startswith("SIZE "):
+            client_sock.sendall(b"ERR Missing size\n")
+            return
 
-            with open(path, "rb") as f:
-                while True:
-                    chunk = f.read(BUFFER_SIZE)
-                    if not chunk:
-                        break
-                    sock.sendall(chunk)
+        try:
+            size = int(size_line.strip().split(" ", 1)[1])
+        except Exception:
+            client_sock.sendall(b"ERR Invalid size\n")
+            return
 
-            status = self._recv_line(sock)
-            print(f"[Client] {status}")
+        safe_path = (self.storage_dir / pathlib.Path(filename)).resolve()
+        safe_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def download_file(self, remote_name, local_name=None):
-        """Download file from the server."""
-        if local_name is None:
-            local_name = remote_name
+        remaining = size
+        with open(safe_path, "wb") as f:
+            while remaining > 0:
+                chunk = client_sock.recv(min(BUFFER_SIZE, remaining))
+                if not chunk:
+                    break
+                f.write(chunk)
+                remaining -= len(chunk)
 
-        with self._connect() as sock:
-            sock.sendall(f"GET {remote_name}\n".encode())
-            response = self._recv_line(sock)
+        if remaining == 0:
+            client_sock.sendall(b"OK\n")
+            print(f"[Server] Received '{filename}' ({size} bytes).")
+        else:
+            client_sock.sendall(b"ERR Incomplete transfer\n")
 
-            if not response:
-                print("[Client] No response from server.")
-                return
-
-            if response.startswith("NOT_FOUND"):
-                print("[Client] File not found on server.")
-                return
-
-            if not response.startswith("FOUND "):
-                print("[Client] Unexpected response:", response)
-                return
-
-            try:
-                size = int(response.split(" ", 1)[1])
-            except Exception:
-                print("[Client] Invalid size in response:", response)
-                return
-
-            remaining = size
-            with open(local_name, "wb") as f:
-                while remaining > 0:
-                    chunk = sock.recv(min(BUFFER_SIZE, remaining))
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    remaining -= len(chunk)
-
-            if remaining == 0:
-                print(f"[Client] Downloaded '{local_name}' ({size} bytes).")
-            else:
-                print("[Client] Download incomplete.")
-
-    @staticmethod
-    def _recv_line(sock):
+    def _recv_line(self, sock: socket.socket) -> str:
+        """Read a single \\n-terminated line from the socket."""
         data = bytearray()
         while True:
             ch = sock.recv(1)
-            if not ch or ch == b"\n":
+            if not ch:
+                break
+            if ch == b"\n":
                 break
             data.extend(ch)
+            if len(data) > 4096:
+                break
         return data.decode(errors="ignore").strip()
 
 
 if __name__ == "__main__":
-    client = FileClient(host="127.0.0.1", port=5001)
-
-    while True:
-        print("\n--- CLIENT MENU ---")
-        print("1) Chat with server (send text messages)")
-        print("2) Upload file to server")
-        print("3) Download file from server")
-        print("4) Exit")
-        choice = input("Enter choice (1-4): ").strip()
-
-        if choice == "1":
-            client.chat()
-
-        elif choice == "2":
-            path = input("Enter local file path to upload: ").strip()
-            name = input("Enter name to save on server (or press Enter to use same name): ").strip()
-            client.upload_file(path, name if name else None)
-
-        elif choice == "3":
-            server_name = input("Enter filename on server: ").strip()
-            local_name = input("Enter local save name (or press Enter to use same name): ").strip()
-            client.download_file(server_name, local_name if local_name else None)
-
-        elif choice == "4":
-            print("Goodbye!")
-            break
-
-        else:
-            print("Invalid choice. Please try again.")
+    server = FileServer(host="0.0.0.0", port=5001, storage_dir="server_files")
+    server.start()
