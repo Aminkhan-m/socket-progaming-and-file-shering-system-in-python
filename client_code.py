@@ -1,5 +1,4 @@
-
-       """
+"""
 @file client.py
 @brief TCP client for uploading and downloading files to/from the FileServer.
 
